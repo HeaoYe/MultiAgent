@@ -1,0 +1,5 @@
+cd leader_follower
+build/MultiAgent -t 64 -dt 0.001 -cfg config.txt | python src/show.py
+
+cd leader_follower_2d
+build/MultiAgents/MultiAgents

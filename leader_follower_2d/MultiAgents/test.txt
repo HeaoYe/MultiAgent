@@ -1,0 +1,28 @@
+A1
+A2
+
+A3
+
+A4
+
+A5
+
+
+
+AGENT:
+    LINK NEIGHBOR:
+        HAS_TEAM:
+            NEIGHBOR_HASNT_TEAM:
+                invite NEIGHBOR
+            NEIGHBOR_HAS_TEAM:
+                merge TEAM
+        HASNT_TEAM:
+            NEIGHBOR_HAS_TEAM:
+                join NEIGHBOR
+            NEIGHBOR_HASNT_TEAM:
+                create_TEAM
+    LOSE NEIGHBOR:
+        HAS_NEIGHBOR:
+            uuid less one change TEAM
+        HASNT_NEIGHBOR:
+            destroy TEAM

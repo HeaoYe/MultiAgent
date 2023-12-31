@@ -1,0 +1,261 @@
+#include "agent.hpp"
+#include "world.hpp"
+
+Agent::Agent(std::string name, const Agent::State &initial_state) : name(name), state(initial_state), back_state(initial_state) {};
+
+template<typename T>
+bool in(const T &t, const std::vector<T> &list) {
+    for (const T &a : list) {
+        if (a == t) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Agent::update(World &world, float dt) {
+    for (const auto &last_neighbor_name : last_neighbors) {
+        if (in(last_neighbor_name, neighbors)) {
+            continue;
+        }
+        auto *count = new CountTeamMemberData { ctrl.team.id, 0 };
+        handle_event(world, AgentEventType::CountTeamMember, count);
+        auto *sync = new SyncTeamMemberData { ctrl.team.id, count->member_num };
+        handle_event(world, AgentEventType::SyncTeamMember, sync);
+        delete sync;
+        delete count;
+        // Lose Neighbor
+        if (neighbors.empty()) {
+            ctrl.has_team = false;
+            ctrl.team = { 0, 0, "", { 0, 0, 0, 0 } };
+        } else {
+            if ((!ctrl.has_team) || (!ctrl.neighbor_info[last_neighbor_name].has_team) || (ctrl.team.id != ctrl.neighbor_info[last_neighbor_name].team.id)) {
+                continue;
+            }
+            auto *leader_data = new QueryLeaderData { ctrl.team.id, false };
+            handle_event(world, AgentEventType::QueryLeader, leader_data);
+            if (!leader_data->found) {
+                auto *data = new ChangeTeamData { ctrl.team.id, { static_cast<uuid_t>(rand()), 1, name, glm::vec4 { rand() % 200, rand() % 200, rand() % 200, 255 } / 255.0f } };
+                handle_event(world, AgentEventType::ChangeTeam, data);
+                delete data;
+            }
+            delete leader_data;
+        }
+        ctrl.neighbor_info.erase(last_neighbor_name);
+    }
+
+    for (const auto &neighbor_name : neighbors) {
+        if (in(neighbor_name, last_neighbors)) {
+            continue;
+        }
+        auto *reply = world.send_event<QueryTeamReply>(AgentEventType::QueryTeam, neighbor_name);
+        // Link Neighbor
+        if (ctrl.has_team) {
+            if (reply->has_team) {
+                // Merge
+                if (ctrl.team.id != reply->team.id && ((reply->team.member_num < ctrl.team.member_num) || (reply->team.member_num == ctrl.team.member_num && uuid > reply->uuid))) {
+                    if (ctrl.team.member_num < max_team_member_num) {
+                        auto *data = new ChangeTeamData { reply->team.id, ctrl.team };
+                        handle_event(world, AgentEventType::ChangeTeam, data);
+                        auto *sync_data = new SyncTeamMemberData { ctrl.team.id, data->dst_team.member_num };
+                        handle_event(world, AgentEventType::SyncTeamMember, sync_data);
+                        delete sync_data;
+                        delete data;
+                        auto *query_leader = new QueryFirstAgentData { reply->team.id, "", false };
+                        handle_event(world, AgentEventType::QueryFirstAgent, query_leader);
+                        if (query_leader->found) {
+                            data = new ChangeTeamData { reply->team.id, { static_cast<uuid_t>(rand()), 0, query_leader->name, reply->team.color }};
+                            handle_event(world, AgentEventType::ChangeTeam, data);
+                            delete data;
+                        }
+                        delete query_leader;
+                    }
+                }
+            } else {
+                // Try Invite To Team
+                if (ctrl.team.member_num < max_team_member_num) {
+                    world.send_event<void>(AgentEventType::InviteToTeam, neighbor_name, new InviteToTeamData { ctrl.team });
+                    auto *sync_data = new SyncTeamMemberData { ctrl.team.id, ctrl.team.member_num + 1 };
+                    handle_event(world, AgentEventType::SyncTeamMember, sync_data);
+                    delete sync_data;
+                }
+            }
+        } else {
+            if (reply->has_team) {
+                // Try Join Team
+                if (reply->team.member_num < max_team_member_num) {
+                    ctrl.has_team = true;
+                    ctrl.team = reply->team;
+                    auto *sync_data = new SyncTeamMemberData { ctrl.team.id, ctrl.team.member_num + 1 };
+                    handle_event(world, AgentEventType::SyncTeamMember, sync_data);
+                    delete sync_data;
+                }
+            } else {
+                // Create Team
+                ctrl.has_team = true;
+                ctrl.team = { static_cast<uuid_t>(rand()), 1, name, glm::vec4 { rand() % 200, rand() % 200, rand() % 200, 255 } / 255.0f };
+                world.send_event<void>(AgentEventType::InviteToTeam, neighbor_name, new InviteToTeamData { ctrl.team });
+                ctrl.team.member_num ++;
+            }
+        }
+
+        delete reply;
+        reply = world.send_event<QueryTeamReply>(AgentEventType::QueryTeam, neighbor_name);
+        ctrl.neighbor_info[neighbor_name] = *reply;
+        delete reply;
+    }
+
+    if (name == ctrl.team.leader) {
+        // Leader Todo
+        auto *data = new LocateData { ctrl.team.id, { 0, 0 }, {} };
+        handle_event(world, AgentEventType::Locate, data);
+        std::sort(data->members.begin(), data->members.end());
+        auto *tasks = new TaskData { ctrl.team.id, {} };
+        tasks->dst_rels_vs[uuid] = { { 0, 0 }, { 0, 0 } };
+        int w = glm::ceil(glm::sqrt(data->members.size() - 1)), i = 0;
+        for (uuid_t mem_uuid : data->members) {
+            if (mem_uuid != uuid) {
+                tasks->dst_rels_vs[mem_uuid] = { { (i % w - (w - 1) / 2.0f) * 50, -(i / w + 1) * 50 }, back_state.v };
+                i += 1;
+            }
+        }
+        handle_event(world, AgentEventType::SetTask, tasks);
+        delete data;
+        delete tasks;
+    }
+
+    if (neighbors.empty()) {
+        state.u = -beta * back_state.v;
+    } else {
+        state.u = { 0, 0 };
+        state.u += alpha * (ctrl.dst_rel - ctrl.rel) + beta * (ctrl.dst_v - back_state.v);
+    }
+}
+
+void *Agent::handle_event(World &world, AgentEventType type, void *data) {
+    switch (type) {
+    case AgentEventType::QueryState:
+        return new QueryStateReply { back_state.x, back_state.v };
+    case AgentEventType::QueryTeam:
+        return new QueryTeamReply { ctrl.has_team, uuid, ctrl.team };
+    case AgentEventType::InviteToTeam: {
+        auto *info = reinterpret_cast<InviteToTeamData *>(data);
+        ctrl.has_team = true;
+        ctrl.team = info->team;
+        ctrl.team.member_num ++;
+        delete info;
+        return nullptr;
+    }
+    case AgentEventType::QueryLeader: {
+        auto *info = reinterpret_cast<QueryLeaderData *>(data);
+        info->asked.push_back(name);
+        if (ctrl.has_team && info->team_id == ctrl.team.id) {
+            if (ctrl.team.leader == name) {
+                info->found = true;
+                return nullptr;
+            }
+        }
+        for (const auto &neighbor_name : neighbors) {
+            if (!in(neighbor_name, info->asked)) {
+                world.send_event<void>(AgentEventType::QueryLeader, neighbor_name, data);
+            }
+        }
+        return nullptr;
+    }
+    case AgentEventType::SyncTeamMember: {
+        auto *info = reinterpret_cast<SyncTeamMemberData *>(data);
+        info->asked.push_back(name);
+        if (ctrl.has_team && info->team_id == ctrl.team.id) {
+            ctrl.team.member_num = info->member_num;
+        }
+        for (const auto &neighbor_name : neighbors) {
+            if (!in(neighbor_name, info->asked)) {
+                world.send_event<void>(AgentEventType::SyncTeamMember, neighbor_name, data);
+            }
+        }
+        return nullptr;
+    }
+    case AgentEventType::CountTeamMember: {
+        auto *info = reinterpret_cast<CountTeamMemberData *>(data);
+        info->asked.push_back(name);
+        if (ctrl.has_team && info->team_id == ctrl.team.id) {
+            info->member_num ++;
+        }
+        for (const auto &neighbor_name : neighbors) {
+            if (!in(neighbor_name, info->asked)) {
+                world.send_event<void>(AgentEventType::CountTeamMember, neighbor_name, data);
+            }
+        }
+        return nullptr;
+    }
+    case AgentEventType::QueryFirstAgent: {
+        auto *info = reinterpret_cast<QueryFirstAgentData *>(data);
+        info->asked.push_back(name);
+        if (ctrl.has_team && info->team_id == ctrl.team.id) {
+            info->name = name;
+            info->found = true;
+            return nullptr;
+        }
+        for (const auto &neighbor_name : neighbors) {
+            if (!in(neighbor_name, info->asked)) {
+                world.send_event<void>(AgentEventType::QueryFirstAgent, neighbor_name, data);
+                if (info->found) {
+                    return nullptr;
+                }
+            }
+        }
+        return nullptr;
+    }
+    case AgentEventType::ChangeTeam: {
+        auto *info = reinterpret_cast<ChangeTeamData *>(data);
+        info->asked.push_back(name);
+        if (ctrl.has_team && info->team_id == ctrl.team.id) {
+            ctrl.team = info->dst_team;
+            info->dst_team.member_num += 1;
+            if (info->dst_team.member_num >= max_team_member_num) {
+                return nullptr;
+            }
+        }
+        for (const auto &neighbor_name : neighbors) {
+            if (!in(neighbor_name, info->asked)) {
+                world.send_event<void>(AgentEventType::ChangeTeam, neighbor_name, data);
+                if (info->dst_team.member_num >= max_team_member_num) {
+                    return nullptr;
+                }
+            }
+        }
+        return nullptr;
+    }
+    case AgentEventType::Locate: {
+        auto *info = reinterpret_cast<LocateData *>(data);
+        info->asked.push_back(name);
+        if (ctrl.has_team && info->team_id == ctrl.team.id) {
+            ctrl.rel = info->rel;
+            info->members.push_back(uuid);
+        }
+        for (const auto &neighbor_name : neighbors) {
+            if (!in(neighbor_name, info->asked)) {
+                info->rel = ctrl.rel + deltas[neighbor_name];
+                world.send_event<void>(AgentEventType::Locate, neighbor_name, data);
+            }
+        }
+        return nullptr;
+    }
+    case AgentEventType::SetTask: {
+        auto *info = reinterpret_cast<TaskData *>(data);
+        info->asked.push_back(name);
+        if (ctrl.has_team && info->team_id == ctrl.team.id) {
+            ctrl.dst_rel = info->dst_rels_vs[uuid].first;
+            ctrl.dst_v = info->dst_rels_vs[uuid].second;
+        }
+        for (const auto &neighbor_name : neighbors) {
+            if (!in(neighbor_name, info->asked)) {
+                world.send_event<void>(AgentEventType::SetTask, neighbor_name, data);
+            }
+        }
+        return nullptr;
+    }
+    default:
+        return nullptr;
+    }
+}
